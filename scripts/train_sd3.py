@@ -377,6 +377,7 @@ def main(_):
     pipeline = StableDiffusion3Pipeline.from_pretrained(
         config.pretrained.model
     )
+
     # freeze parameters of models to save more memory
     pipeline.vae.requires_grad_(False)
     pipeline.text_encoder.requires_grad_(False)
@@ -600,7 +601,7 @@ def main(_):
     while True:
         #################### EVAL ####################
         pipeline.transformer.eval()
-        if epoch % config.eval_freq == 0:
+        if epoch % config.eval_freq == 0 and epoch > 0:
             eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerator, global_step, eval_reward_fn, executor, autocast, num_train_timesteps, ema, transformer_trainable_parameters)
         if epoch % config.save_freq == 0 and epoch > 0 and accelerator.is_main_process:
             save_ckpt(config.save_dir, transformer, global_step, accelerator, ema, transformer_trainable_parameters, config)
@@ -960,4 +961,3 @@ def main(_):
         
 if __name__ == "__main__":
     app.run(main)
-
