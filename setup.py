@@ -9,9 +9,9 @@ setup(
         "torch==2.6.0",
         "torchvision==0.21.0",
         "torchaudio",
-        "transformers==4.40.0",
+        "transformers==4.41.2",
         "accelerate==1.4.0",
-        "diffusers==0.33.1", 
+        'diffusers==0.33.1', 
         
         "numpy==1.26.4",
         "pandas==2.2.3",
@@ -31,8 +31,8 @@ setup(
         
         # "flash-attn==2.7.4.post1",
         "deepspeed==0.16.4",  
-        "peft==0.10.0",       
-        "bitsandbytes==0.45.3",
+        "peft==0.15.0",       
+        "bitsandbytes==0.43.1",
         
         "aiohttp==3.11.13",
         "fastapi==0.115.11", 
@@ -49,6 +49,7 @@ setup(
         "ml_collections",
         "sentencepiece",
         "openai",
+        "triton",
     ],
     extras_require={
         "dev": [
