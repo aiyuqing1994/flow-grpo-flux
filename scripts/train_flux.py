@@ -340,7 +340,6 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
                     height=config.resolution,
                     width=config.resolution,
                     noise_level=0,
-                    accelerator=accelerator
                 )
         rewards = executor.submit(reward_fn, output_images, texts, prompt_metadata, only_strict=False)
         # yield to to make sure reward computation starts
@@ -348,10 +347,10 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
         rewards, reward_metadata = rewards.result()
 
         for key, value in rewards.items():
-            rewards_gather = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
+            rewards_gather = accelerator.gather(torch.as_tensor(value, device=accelerator.device)).cpu().float().numpy()
             all_rewards[key].append(rewards_gather)
 
-    last_batch_images_gather = accelerator.gather(torch.as_tensor(output_images, device=accelerator.device)).cpu().numpy()
+    last_batch_images_gather = accelerator.gather(torch.as_tensor(output_images, device=accelerator.device)).cpu().float().numpy()
     last_batch_prompt_ids = tokenizers[0](
         prompts,
         padding="max_length",
@@ -366,7 +365,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
     last_batch_rewards_gather = {}
     for key, value in rewards.items():
         last_batch_rewards_gather[key] = accelerator.gather(
-            torch.as_tensor(value, device=accelerator.device)).cpu().numpy()
+            torch.as_tensor(value, device=accelerator.device)).cpu().float().numpy()
 
     all_rewards = {key: np.concatenate(value) for key, value in all_rewards.items()}
     if accelerator.is_main_process:
@@ -662,7 +661,7 @@ def main(_):
     while True:
         #################### EVAL ####################
         pipeline.transformer.eval()
-        if epoch % config.eval_freq == 0:
+        if epoch % config.eval_freq == 0 and epoch > 0:
             eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerator, global_step, eval_reward_fn,
                  executor, autocast, num_train_timesteps, ema, transformer_trainable_parameters)
         if epoch % config.save_freq == 0 and epoch > 0 and accelerator.is_main_process:
@@ -759,7 +758,6 @@ def main(_):
                 position=0,
         ):
             rewards, reward_metadata = sample["rewards"].result()
-            # accelerator.print(reward_metadata)
             sample["rewards"] = {
                 key: torch.as_tensor(value, device=accelerator.device).float()
                 for key, value in rewards.items()
@@ -785,7 +783,7 @@ def main(_):
                 for idx, i in enumerate(sample_indices):
                     image = output_images[i]
                     pil = Image.fromarray(
-                        (image.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                        (image.cpu().float().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
                     )
                     pil = pil.resize((config.resolution, config.resolution))
                     pil.save(os.path.join(tmpdir, f"{idx}.jpg"))  # 使用新的索引

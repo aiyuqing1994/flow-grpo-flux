@@ -55,7 +55,6 @@ def flux_pipeline_with_logprob(
     max_area: int = 1024 ** 2,
     _auto_resize: bool = True,
     noise_level: float = 0.7,
-    accelerator=None,
 ):
     height = height or self.default_sample_size * self.vae_scale_factor
     width = width or self.default_sample_size * self.vae_scale_factor
@@ -141,7 +140,6 @@ def flux_pipeline_with_logprob(
             lora_scale=lora_scale,
         )
 
-    print(accelerator.print(f"x {image}"))
     # 3. Preprocess image
     if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
         img = image[0] if isinstance(image, list) else image
@@ -156,7 +154,6 @@ def flux_pipeline_with_logprob(
         image_height = image_height // multiple_of * multiple_of
         image = self.image_processor.resize(image, image_height, image_width)
         image = self.image_processor.preprocess(image, image_height, image_width)
-        print(accelerator.print(f"y {image}"))
 
     # 4. Prepare latent variables
     num_channels_latents = self.transformer.config.in_channels // 4
@@ -220,9 +217,6 @@ def flux_pipeline_with_logprob(
             latent_model_input = latents
             if image_latents is not None:
                 latent_model_input = torch.cat([latents, image_latents], dim=1)
-            if accelerator:
-                accelerator.print(f"latents has nans: {torch.isnan(latents).any()}")
-                accelerator.print(f"image_latents has nans: {torch.isnan(image_latents).any() if image_latents is not None else 'N/A'}")
             timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
             noise_pred = self.transformer(
@@ -256,18 +250,13 @@ def flux_pipeline_with_logprob(
             # compute the previous noisy sample x_t -> x_t-1
             latents_dtype = latents.dtype
 
-            if accelerator:
-                accelerator.print(f"noise_pred {noise_pred}")
             latents, log_prob, prev_latents_mean, std_dev_t = sde_step_with_logprob(
                 self.scheduler,
                 noise_pred.float(),
                 t.unsqueeze(0),
                 latents.float(),
                 noise_level=noise_level,
-                accelerator=accelerator
             )
-
-            print(accelerator.print(f"{i} {latents}"))
 
             all_latents.append(latents)
             all_log_probs.append(log_prob)
@@ -282,8 +271,6 @@ def flux_pipeline_with_logprob(
     latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
     image = self.vae.decode(latents, return_dict=False)[0]
     image = self.image_processor.postprocess(image, output_type=output_type)
-
-    print(accelerator.print(f"z {image}"))
 
     # Offload all models
     self.maybe_free_model_hooks()

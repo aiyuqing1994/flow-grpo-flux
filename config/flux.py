@@ -42,7 +42,7 @@ def get_config():
     # -- Logging and Saving --
     config.save_dir = 'logs/ocr/flux'
     config.run_name = "flux_grpo"
-    config.save_freq = 1
-    config.eval_freq = 1
+    config.save_freq = 2
+    config.eval_freq = 10
 
     return config
