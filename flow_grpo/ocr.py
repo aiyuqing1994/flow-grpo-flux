@@ -28,7 +28,7 @@ class OcrScorer:
         :param prompts: Corresponding target text list
         :return: Reward tensor (CPU)
         """
-        prompts = [prompt.split('"')[1] for prompt in prompts]
+        #prompts = [prompt.split('"')[1] for prompt in prompts]
         rewards = []
         # Ensure input lengths are consistent
         assert len(images) == len(prompts), "Images and prompts must have the same length"

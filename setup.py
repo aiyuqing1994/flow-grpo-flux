@@ -11,7 +11,7 @@ setup(
         "torchaudio",
         "transformers==4.41.2",
         "accelerate==1.4.0",
-        'diffusers==0.33.1', 
+        "diffusers @ git+https://github.com/huggingface/diffusers.git", 
         
         "numpy==1.26.4",
         "pandas==2.2.3",
