@@ -14,9 +14,9 @@ def get_config():
 
     config.dataset = "data/cleaned/results20k_updated2.csv"
 
-    config.sample.train_batch_size = 8
-    config.sample.num_image_per_prompt = 8
-    config.sample.num_batches_per_epoch = int(8/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
+    config.sample.train_batch_size = 4#8
+    config.sample.num_image_per_prompt = 2#8
+    config.sample.num_batches_per_epoch = 2#int(8/(gpu_number*config.sample.train_batch_size/config.sample.num_image_per_prompt))
     assert config.sample.num_batches_per_epoch % 2 == 0, "Please set config.sample.num_batches_per_epoch to an even number! This ensures that config.train.gradient_accumulation_steps = config.sample.num_batches_per_epoch / 2, so that gradients are updated twice per epoch."
     config.sample.test_batch_size = 8
     config.sample.num_steps = 10

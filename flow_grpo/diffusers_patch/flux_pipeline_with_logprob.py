@@ -275,4 +275,5 @@ def flux_pipeline_with_logprob(
     # Offload all models
     self.maybe_free_model_hooks()
 
-    return image, all_latents, all_log_probs
+    latent_ids = latent_ids.unsqueeze(0).expand(batch_size, -1, -1)
+    return image, all_latents, all_log_probs, image_latents, latent_ids

@@ -249,12 +249,31 @@ def get_sigmas(noise_scheduler, timesteps, accelerator, n_dim=4, dtype=torch.flo
 
 
 def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, config):
+    device = embeds.device
+    dtype = embeds.dtype
+
+    text_ids = torch.zeros(embeds.shape[1], 3, device=device, dtype=dtype)
+
+    if transformer.config.guidance_embeds:
+        base_guidance = torch.full([1], config.sample.guidance_scale, device=device, dtype=torch.float32)
+    else:
+        base_guidance = None
+
+    latent_model_input = torch.cat([sample["latents"][:, j], sample["image_latent"]], dim=1)
     if config.train.cfg:
+        # If CFG is on, expand guidance to match the doubled batch size.
+        if base_guidance is not None:
+            guidance = base_guidance.expand(sample["latents"].shape[0] * 2)
+        else:
+            guidance = None
         noise_pred = transformer(
-            hidden_states=torch.cat([sample["latents"][:, j]] * 2),
+            hidden_states=torch.cat([latent_model_input] * 2),
             timestep=torch.cat([sample["timesteps"][:, j]] * 2),
             encoder_hidden_states=embeds,
             pooled_projections=pooled_embeds,
+            guidance=guidance,
+            txt_ids=text_ids,
+            img_ids=sample["latent_ids"],
             return_dict=False,
         )[0]
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -265,11 +284,20 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
                 * (noise_pred_text - noise_pred_uncond)
         )
     else:
+        # If CFG is off, expand guidance to the original batch size.
+        if base_guidance is not None:
+            guidance = base_guidance.expand(sample["latents"].shape[0])
+        else:
+            guidance = None
+
         noise_pred = transformer(
-            hidden_states=sample["latents"][:, j],
+            hidden_states=latent_model_input,
             timestep=sample["timesteps"][:, j],
             encoder_hidden_states=embeds,
             pooled_projections=pooled_embeds,
+            guidance=guidance,
+            txt_ids=text_ids,
+            img_ids=sample["latent_ids"],
             return_dict=False,
         )[0]
 
@@ -327,7 +355,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
 
         with autocast():
             with torch.no_grad():
-                output_images, _, _ = flux_pipeline_with_logprob(
+                output_images, _, _, _, _ = flux_pipeline_with_logprob(
                     pipeline,
                     image=input_images,
                     prompt_embeds=prompt_embeds,
@@ -704,7 +732,7 @@ def main(_):
             # sample
             with autocast():
                 with torch.no_grad():
-                    output_images, latents, log_probs = flux_pipeline_with_logprob(
+                    output_images, latents, log_probs, image_latent, latent_ids = flux_pipeline_with_logprob(
                         pipeline,
                         image=input_images,
                         prompt_embeds=prompt_embeds,
@@ -747,6 +775,8 @@ def main(_):
                                     ],  # each entry is the latent after timestep t
                     "log_probs": log_probs,
                     "rewards": rewards,
+                    "image_latent": image_latent,
+                    "latent_ids": latent_ids,
                 }
             )
 
