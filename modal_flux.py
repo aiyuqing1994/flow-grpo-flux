@@ -91,7 +91,7 @@ app = modal.App(
 
 
 @app.function(
-    gpu="A100-80GB",  # FLUX is less demanding than SD3
+    gpu="H200",
     timeout=86400,  # 24 hours
     secrets=[
         modal.Secret.from_name("huggingface-token"),

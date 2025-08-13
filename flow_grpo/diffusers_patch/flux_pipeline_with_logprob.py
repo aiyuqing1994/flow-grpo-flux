@@ -53,7 +53,7 @@ def flux_pipeline_with_logprob(
     callback_on_step_end_tensor_inputs: List[str] = ["latents"],
     max_sequence_length: int = 512,
     max_area: int = 1024 ** 2,
-    _auto_resize: bool = True,
+    _auto_resize: bool = False,
     noise_level: float = 0.7,
 ):
     height = height or self.default_sample_size * self.vae_scale_factor

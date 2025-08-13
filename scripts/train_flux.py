@@ -30,7 +30,7 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 import flow_grpo.prompts
 import flow_grpo.rewards
 from flow_grpo.diffusers_patch.flux_pipeline_with_logprob import flux_pipeline_with_logprob
-from flow_grpo.diffusers_patch.sd3_sde_with_logprob import sde_step_with_logprob
+from flow_grpo.diffusers_patch.flux_sde_with_logprob import sde_step_with_logprob
 from flow_grpo.diffusers_patch.train_dreambooth_lora_flux import encode_prompt
 from flow_grpo.ema import EMAModuleWrapper
 from flow_grpo.stat_tracking import PerPromptStatTracker
@@ -52,7 +52,7 @@ IMAGE_CACHE_DIR = "data/images_tmp"
 
 # --- Dataset ---
 class ImageEditDataset(Dataset):
-    def __init__(self, csv_path, split='train', resolution=768, test_count=16, image_cache_dir=IMAGE_CACHE_DIR):
+    def __init__(self, csv_path, split='train', resolution=512, test_count=512, image_cache_dir=IMAGE_CACHE_DIR):
         self.csv_path = csv_path
         self.split = split
         self.test_count = test_count
@@ -254,10 +254,7 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
 
     text_ids = torch.zeros(embeds.shape[1], 3, device=device, dtype=dtype)
 
-    if transformer.config.guidance_embeds:
-        base_guidance = torch.full([1], config.sample.guidance_scale, device=device, dtype=torch.float32)
-    else:
-        base_guidance = None
+    base_guidance = torch.full([1], config.sample.guidance_scale, device=device, dtype=torch.float32)
 
     latent_model_input = torch.cat([sample["latents"][:, j], sample["image_latent"]], dim=1)
     if config.train.cfg:
@@ -266,6 +263,7 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
             guidance = base_guidance.expand(sample["latents"].shape[0] * 2)
         else:
             guidance = None
+
         noise_pred = transformer(
             hidden_states=torch.cat([latent_model_input] * 2),
             timestep=torch.cat([sample["timesteps"][:, j]] * 2),
@@ -273,9 +271,10 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
             pooled_projections=pooled_embeds,
             guidance=guidance,
             txt_ids=text_ids,
-            img_ids=sample["latent_ids"],
+            img_ids=sample["latent_ids"][0],
             return_dict=False,
         )[0]
+        noise_pred = noise_pred[:, : sample["latents"][:, j].size(1)]
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred_uncond = noise_pred_uncond.detach()
         noise_pred = (
@@ -297,9 +296,10 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
             pooled_projections=pooled_embeds,
             guidance=guidance,
             txt_ids=text_ids,
-            img_ids=sample["latent_ids"],
+            img_ids=sample["latent_ids"][0],
             return_dict=False,
         )[0]
+        noise_pred = noise_pred[:, : sample["latents"][:, j].size(1)]
 
     # compute the log prob of next_latents given latents under the current model
     prev_sample, log_prob, prev_sample_mean, std_dev_t = sde_step_with_logprob(
@@ -367,6 +367,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
                     output_type="pt",
                     height=config.resolution,
                     width=config.resolution,
+                    max_area=config.resolution ** 2,
                     noise_level=0,
                 )
         rewards = executor.submit(reward_fn, output_images, texts, prompt_metadata, only_strict=False)
@@ -689,7 +690,7 @@ def main(_):
     while True:
         #################### EVAL ####################
         pipeline.transformer.eval()
-        if epoch % config.eval_freq == 0 and epoch > 0:
+        if epoch % config.eval_freq == 0:
             eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerator, global_step, eval_reward_fn,
                  executor, autocast, num_train_timesteps, ema, transformer_trainable_parameters)
         if epoch % config.save_freq == 0 and epoch > 0 and accelerator.is_main_process:
@@ -745,6 +746,7 @@ def main(_):
                         height=config.resolution,
                         width=config.resolution,
                         noise_level=config.sample.noise_level,
+                        max_area=config.resolution ** 2,
                     )
 
             latents = torch.stack(
@@ -833,6 +835,12 @@ def main(_):
                     },
                     step=global_step,
                 )
+
+            # Clean up memory after sampling
+            del output_images
+            del rewards
+            torch.cuda.empty_cache()
+
         samples["rewards"]["ori_avg"] = samples["rewards"]["avg"]
         # The purpose of repeating `adv` along the timestep dimension here is to make it easier to introduce timestep-dependent advantages later, such as adding a KL reward.
         samples["rewards"]["avg"] = samples["rewards"]["avg"].unsqueeze(1).repeat(1, num_train_timesteps)
@@ -977,7 +985,7 @@ def main(_):
                                                                                                   pooled_embeds, config)
                             if config.train.beta > 0:
                                 with torch.no_grad():
-                                    with transformer.module.disable_adapter():
+                                    with transformer.disable_adapter():
                                         prev_sample_ref, log_prob_ref, prev_sample_mean_ref, std_dev_t_ref = compute_log_prob(
                                             transformer, pipeline, sample, j, embeds, pooled_embeds, config)
 
@@ -996,9 +1004,7 @@ def main(_):
                         )
                         policy_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
                         if config.train.beta > 0:
-                            kl_loss = ((prev_sample_mean - prev_sample_mean_ref) ** 2).mean(dim=(1, 2, 3),
-                                                                                            keepdim=True) / (
-                                                  2 * std_dev_t ** 2)
+                            kl_loss = ((prev_sample_mean - prev_sample_mean_ref) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t ** 2)
                             kl_loss = torch.mean(kl_loss)
                             loss = policy_loss + config.train.beta * kl_loss
                         else:
