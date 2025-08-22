@@ -6,7 +6,7 @@
 #CUDA_VISIBLE_DEVICES="" accelerate launch scripts/train_flux.py --config=config/flux.py
 
 # 1 GPU
-accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml --num_processes=1 --main_process_port 29502 scripts/train_flux.py --config config/flux.py
+#accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml --num_processes=1 --main_process_port 29502 scripts/train_flux.py --config config/flux.py
 
-# 4 GPU
-# accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml --num_processes=4 --main_process_port 29502 scripts/train_flux.py --config config/flux.py
+# 8 GPU
+accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml --num_processes=8 --main_process_port 29502 scripts/train_flux.py --config config/flux.py

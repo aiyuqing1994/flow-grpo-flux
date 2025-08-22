@@ -30,7 +30,7 @@ from torch.utils.data import Dataset, DataLoader, Sampler
 import flow_grpo.prompts
 import flow_grpo.rewards
 from flow_grpo.diffusers_patch.flux_pipeline_with_logprob import flux_pipeline_with_logprob
-from flow_grpo.diffusers_patch.flux_sde_with_logprob import sde_step_with_logprob
+from flow_grpo.diffusers_patch.sd3_sde_with_logprob import sde_step_with_logprob
 from flow_grpo.diffusers_patch.train_dreambooth_lora_flux import encode_prompt
 from flow_grpo.ema import EMAModuleWrapper
 from flow_grpo.stat_tracking import PerPromptStatTracker
@@ -105,25 +105,36 @@ class ImageEditDataset(Dataset):
         if os.path.exists(cached_image_path):
             try:
                 return Image.open(cached_image_path).convert("RGB").resize(self.target_shape, resample=Image.BICUBIC)
-            except IOError:
-                pass
+            except (IOError, SyntaxError, Image.UnidentifiedImageError):
+                print(f"Warning: Corrupted image at {cached_image_path}. Will try to re-download.")
+                try:
+                    os.remove(cached_image_path)
+                except:
+                    pass
 
         try:
             response = requests.get(image_url, stream=True, timeout=10)
             response.raise_for_status()
-            image = Image.open(io.BytesIO(response.content)).convert("RGB")
 
-            image.save(cached_image_path)
-            return image.resize(self.target_shape, resample=Image.BICUBIC)
-        except (requests.RequestException, IOError, Image.UnidentifiedImageError):
-            print(f"Warning: Could not download or process image from URL: {image_url}")
+            # Try to open the image from the downloaded content before saving
+            try:
+                image = Image.open(io.BytesIO(response.content)).convert("RGB")
+                image.save(cached_image_path)
+                image = image.resize(self.target_shape, resample=Image.BICUBIC)
+            except (IOError, SyntaxError, Image.UnidentifiedImageError):
+                print(f"Warning: Source image from URL is corrupted or not an image: {image_url}")
+                return None
+
+            return image
+        except requests.RequestException:
+            print(f"Warning: Could not download image from URL: {image_url}")
             return None
 
     def _construct_prompt(self, row):
         description = row.get(DESCRIPTION_COLUMN, "")
         product_text = row.get(OCR_COLUMN, "")
         start_prompt = f"Follow this specific direction for the composition: {description}. " if description else ""
-        basic_prompt = "Create a photorealistic scene or background that best suits and complements the product..."
+        basic_prompt = "Create a photorealistic scene or background that best suits and complements the product. Place the product while naturally integrating it into the environment. Ensure proper lighting, natural poses, and environmental details that enhance realism and focus on the product's key features. All products must follow proper physical rules, no floating in the air; product size should be appropriate and realistic."
         product_text_prompt = f'Put the following text clearly and readable on the product: "{product_text}". DO NOT CHANGE THE TEXT.' if product_text else ""
         return f"{start_prompt}{basic_prompt} {product_text_prompt}".strip()
 
@@ -135,7 +146,7 @@ class ImageEditDataset(Dataset):
     def collate_fn(examples):
         examples = [e for e in examples if e["image"] is not None]
         if not examples:
-            return None, None, None
+            return None, None, None, None
         prompts = [e["prompt"] for e in examples]
         texts = [e["text"] for e in examples]
         images = [e["image"] for e in examples]
@@ -256,50 +267,23 @@ def compute_log_prob(transformer, pipeline, sample, j, embeds, pooled_embeds, co
 
     base_guidance = torch.full([1], config.sample.guidance_scale, device=device, dtype=torch.float32)
 
-    latent_model_input = torch.cat([sample["latents"][:, j], sample["image_latent"]], dim=1)
-    if config.train.cfg:
-        # If CFG is on, expand guidance to match the doubled batch size.
-        if base_guidance is not None:
-            guidance = base_guidance.expand(sample["latents"].shape[0] * 2)
-        else:
-            guidance = None
-
-        noise_pred = transformer(
-            hidden_states=torch.cat([latent_model_input] * 2),
-            timestep=torch.cat([sample["timesteps"][:, j]] * 2),
-            encoder_hidden_states=embeds,
-            pooled_projections=pooled_embeds,
-            guidance=guidance,
-            txt_ids=text_ids,
-            img_ids=sample["latent_ids"][0],
-            return_dict=False,
-        )[0]
-        noise_pred = noise_pred[:, : sample["latents"][:, j].size(1)]
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred_uncond = noise_pred_uncond.detach()
-        noise_pred = (
-                noise_pred_uncond
-                + config.sample.guidance_scale
-                * (noise_pred_text - noise_pred_uncond)
-        )
+    latent_model_input = torch.cat([sample["latents"][:, j], sample["image_latent"]], dim=1).to(dtype)
+    if base_guidance is not None:
+        guidance = base_guidance.expand(sample["latents"].shape[0])
     else:
-        # If CFG is off, expand guidance to the original batch size.
-        if base_guidance is not None:
-            guidance = base_guidance.expand(sample["latents"].shape[0])
-        else:
-            guidance = None
+        guidance = None
 
-        noise_pred = transformer(
-            hidden_states=latent_model_input,
-            timestep=sample["timesteps"][:, j],
-            encoder_hidden_states=embeds,
-            pooled_projections=pooled_embeds,
-            guidance=guidance,
-            txt_ids=text_ids,
-            img_ids=sample["latent_ids"][0],
-            return_dict=False,
-        )[0]
-        noise_pred = noise_pred[:, : sample["latents"][:, j].size(1)]
+    noise_pred = transformer(
+        hidden_states=latent_model_input,
+        timestep=sample["timesteps"][:, j] / 1000,
+        encoder_hidden_states=embeds,
+        pooled_projections=pooled_embeds,
+        guidance=guidance,
+        txt_ids=text_ids,
+        img_ids=sample["latent_ids"][0],
+        return_dict=False,
+    )[0]
+    noise_pred = noise_pred[:, : sample["latents"][:, j].size(1)]
 
     # compute the log prob of next_latents given latents under the current model
     prev_sample, log_prob, prev_sample_mean, std_dev_t = sde_step_with_logprob(
@@ -319,7 +303,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
     if config.train.ema:
         ema.copy_ema_to(transformer_trainable_parameters, store_temp=True)
     neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers,
-                                                                        max_sequence_length=128,
+                                                                        max_sequence_length=256,
                                                                         device=accelerator.device)
 
     sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.test_batch_size, 1, 1)
@@ -339,7 +323,7 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
             prompts,
             text_encoders,
             tokenizers,
-            max_sequence_length=128,
+            max_sequence_length=256,
             device=accelerator.device
         )
         # The last batch may not be full batch_size
@@ -431,6 +415,13 @@ def eval(pipeline, test_dataloader, text_encoders, tokenizers, config, accelerat
     if config.train.ema:
         ema.copy_temp_to(transformer_trainable_parameters)
 
+    del all_rewards
+    del last_batch_images_gather
+    del last_batch_prompt_ids_gather
+    del last_batch_rewards_gather
+    del output_images
+    torch.cuda.empty_cache()
+
 
 def unwrap_model(model, accelerator):
     model = accelerator.unwrap_model(model)
@@ -478,6 +469,8 @@ def main(_):
         # the total number of optimizer steps to accumulate across.
         gradient_accumulation_steps=config.train.gradient_accumulation_steps * num_train_timesteps,
     )
+    accelerator.state.deepspeed_plugin.deepspeed_config['train_micro_batch_size_per_gpu'] = config.train.batch_size
+
     if accelerator.is_main_process:
         wandb.init(
             project="flow_grpo",
@@ -535,18 +528,23 @@ def main(_):
     if config.use_lora:
         # Set correct lora layers
         target_modules = [
+            "attn.to_k",
+            "attn.to_q",
+            "attn.to_v",
+            "attn.to_out.0",
             "attn.add_k_proj",
             "attn.add_q_proj",
             "attn.add_v_proj",
             "attn.to_add_out",
-            "attn.to_k",
-            "attn.to_out.0",
-            "attn.to_q",
-            "attn.to_v",
+            "ff.net.0.proj",
+            "ff.net.2",
+            "ff_context.net.0.proj",
+            "ff_context.net.2",
+            "proj_mlp",
         ]
         transformer_lora_config = LoraConfig(
-            r=32,
-            lora_alpha=64,
+            r=64,
+            lora_alpha=128,
             init_lora_weights="gaussian",
             target_modules=target_modules,
         )
@@ -625,7 +623,7 @@ def main(_):
     )
 
     neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings([""], text_encoders, tokenizers,
-                                                                        max_sequence_length=128,
+                                                                        max_sequence_length=256,
                                                                         device=accelerator.device)
 
     sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.train_batch_size, 1, 1)
@@ -647,6 +645,11 @@ def main(_):
     # Prepare everything with our `accelerator`.
     transformer, optimizer, train_dataloader, test_dataloader = accelerator.prepare(transformer, optimizer,
                                                                                     train_dataloader, test_dataloader)
+
+    if config.use_lora:
+        unwrap_model(transformer, accelerator).gradient_checkpointing = True
+    else:
+        transformer.gradient_checkpointing = True
 
     # executor to perform callbacks asynchronously. this is beneficial for the llava callbacks which makes a request to a
     # remote server running llava inference.
@@ -719,7 +722,7 @@ def main(_):
                 prompts,
                 text_encoders,
                 tokenizers,
-                max_sequence_length=128,
+                max_sequence_length=256,
                 device=accelerator.device
             )
             prompt_ids = tokenizers[0](
@@ -828,7 +831,7 @@ def main(_):
                         "images": [
                             wandb.Image(
                                 os.path.join(tmpdir, f"{idx}.jpg"),
-                                caption=f"{prompt:.100} | avg: {avg_reward:.2f}",
+                                caption=f"{prompt:.1000} | avg: {avg_reward:.2f}",
                             )
                             for idx, (prompt, avg_reward) in enumerate(zip(sampled_prompts, sampled_rewards))
                         ],
@@ -957,18 +960,8 @@ def main(_):
                     position=0,
                     disable=not accelerator.is_local_main_process,
             ):
-                if config.train.cfg:
-                    # concat negative prompts to sample prompts to avoid two forward passes
-                    embeds = torch.cat(
-                        [train_neg_prompt_embeds[:len(sample["prompt_embeds"])], sample["prompt_embeds"]]
-                    )
-                    pooled_embeds = torch.cat(
-                        [train_neg_pooled_prompt_embeds[:len(sample["pooled_prompt_embeds"])],
-                         sample["pooled_prompt_embeds"]]
-                    )
-                else:
-                    embeds = sample["prompt_embeds"]
-                    pooled_embeds = sample["pooled_prompt_embeds"]
+                embeds = sample["prompt_embeds"]
+                pooled_embeds = sample["pooled_prompt_embeds"]
 
                 train_timesteps = [step_index for step_index in range(num_train_timesteps)]
                 for j in tqdm(
@@ -1004,7 +997,7 @@ def main(_):
                         )
                         policy_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
                         if config.train.beta > 0:
-                            kl_loss = ((prev_sample_mean - prev_sample_mean_ref) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t ** 2)
+                            kl_loss = ((prev_sample_mean - prev_sample_mean_ref) ** 2).mean(dim=(1, 2, 3), keepdim=True) / (2 * std_dev_t ** 2)
                             kl_loss = torch.mean(kl_loss)
                             loss = policy_loss + config.train.beta * kl_loss
                         else:

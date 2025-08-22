@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import calculate_shift, retrieve_timesteps
 
-from .flux_sde_with_logprob import sde_step_with_logprob
+from .sd3_sde_with_logprob import sde_step_with_logprob
 
 PREFERRED_KONTEXT_RESOLUTIONS = [
     (672, 1568),
@@ -35,7 +35,6 @@ def flux_pipeline_with_logprob(
     prompt_2: Optional[Union[str, List[str]]] = None,
     negative_prompt: Union[str, List[str]] = None,
     negative_prompt_2: Optional[Union[str, List[str]]] = None,
-    true_cfg_scale: float = 1.0,
     height: Optional[int] = None,
     width: Optional[int] = None,
     num_inference_steps: int = 28,
@@ -106,10 +105,6 @@ def flux_pipeline_with_logprob(
     lora_scale = (
         self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
     )
-    has_neg_prompt = negative_prompt is not None or (
-            negative_prompt_embeds is not None and negative_pooled_prompt_embeds is not None
-    )
-    do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
     (
         prompt_embeds,
         pooled_prompt_embeds,
@@ -124,21 +119,6 @@ def flux_pipeline_with_logprob(
         max_sequence_length=max_sequence_length,
         lora_scale=lora_scale,
     )
-    if do_true_cfg:
-        (
-            negative_prompt_embeds,
-            negative_pooled_prompt_embeds,
-            negative_text_ids,
-        ) = self.encode_prompt(
-            prompt=negative_prompt,
-            prompt_2=negative_prompt_2,
-            prompt_embeds=negative_prompt_embeds,
-            pooled_prompt_embeds=negative_pooled_prompt_embeds,
-            device=device,
-            num_images_per_prompt=num_images_per_prompt,
-            max_sequence_length=max_sequence_length,
-            lora_scale=lora_scale,
-        )
 
     # 3. Preprocess image
     if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
@@ -231,29 +211,12 @@ def flux_pipeline_with_logprob(
                 return_dict=False,
             )[0]
             noise_pred = noise_pred[:, : latents.size(1)]
-
-            if do_true_cfg:
-                neg_noise_pred = self.transformer(
-                    hidden_states=latent_model_input,
-                    timestep=timestep / 1000,
-                    guidance=guidance,
-                    pooled_projections=negative_pooled_prompt_embeds,
-                    encoder_hidden_states=negative_prompt_embeds,
-                    txt_ids=negative_text_ids,
-                    img_ids=latent_ids,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
-                    return_dict=False,
-                )[0]
-                neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
-                noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-
-            # compute the previous noisy sample x_t -> x_t-1
             latents_dtype = latents.dtype
 
             latents, log_prob, prev_latents_mean, std_dev_t = sde_step_with_logprob(
                 self.scheduler,
                 noise_pred.float(),
-                t.unsqueeze(0),
+                t.unsqueeze(0).repeat(latents.shape[0]),
                 latents.float(),
                 noise_level=noise_level,
             )

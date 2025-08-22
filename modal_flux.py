@@ -91,7 +91,7 @@ app = modal.App(
 
 
 @app.function(
-    gpu="H200",
+    gpu="H200:8",
     timeout=86400,  # 24 hours
     secrets=[
         modal.Secret.from_name("huggingface-token"),
@@ -117,7 +117,7 @@ def train():
     # Training command for train_flux.py
     cmd = (
         "python -m accelerate.commands.launch "
-        "--config_file scripts/accelerate_configs/single_gpu.yaml "
+        "--config_file scripts/accelerate_configs/deepspeed_zero2.yaml "
         "--main_process_port 29501 "
         "scripts/train_flux.py "
         "--config config/flux.py"
